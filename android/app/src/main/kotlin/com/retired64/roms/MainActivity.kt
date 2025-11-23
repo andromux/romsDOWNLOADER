@@ -1,4 +1,4 @@
-package com.example.romsadownloader
+package com.retired64.roms
 
 import io.flutter.embedding.android.FlutterActivity
 
