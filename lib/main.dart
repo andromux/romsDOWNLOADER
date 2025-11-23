@@ -1,69 +1,46 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:ui';
 import 'package:dio/dio.dart';
-import 'package:external_path/external_path.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:flutter_downloader/flutter_downloader.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
+
 // ============================================================================
-// 1. CONFIGURACIÓN E INICIALIZACIÓN
+// 1. CORE & CONFIGURACIÓN
 // ============================================================================
 
 const String kApiBaseUrl = "https://api.crocdb.net";
-const double kBorderRadius = 28.0; 
-
-@pragma('vm:entry-point')
-void downloadCallback(String id, int status, int progress) {
-  final SendPort? send = IsolateNameServer.lookupPortByName('downloader_send_port');
-  send?.send([id, status, progress]);
-}
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    systemNavigationBarColor: Colors.transparent,
-  ));
-
-  if (Platform.isAndroid || Platform.isIOS) {
-    await FlutterDownloader.initialize(debug: true, ignoreSsl: true);
-  }
-
-  runApp(const ProviderScope(child: CrocDbApp()));
-}
+const double kBorderRadius = 24.0;
+const Duration kAnimationDuration = Duration(milliseconds: 400);
 
 class AppColors {
-  // Modern Android Dark Palette
-  static const Color darkBg = Color(0xFF121212); 
-  static const Color darkSurface = Color(0xFF1E1E2C);
-  static const Color primaryNeon = Color(0xFFBB86FC); 
-  static const Color secondaryNeon = Color(0xFF03DAC6); 
+  // Modo Oscuro (Cyberpunk/Neon)
+  static const Color darkBg = Color(0xFF0A0A0F);
+  static const Color darkSurface = Color(0xFF161622);
+  static const Color neonCyan = Color(0xFF00FFFF);
+  static const Color neonMagenta = Color(0xFFFF00FF);
+  static const Color neonPurple = Color(0xFFBC13FE);
   
-  // Modern Android Light Palette
-  static const Color lightBg = Color(0xFFFDFDF5);
+  // Modo Claro (Clean/Soft)
+  static const Color lightBg = Color(0xFFF5F5FA);
   static const Color lightSurface = Color(0xFFFFFFFF);
-  static const Color lightPrimary = Color(0xFF6750A4); 
-  static const Color lightSecondary = Color(0xFF625B71);
+  static const Color lightAccent = Color(0xFF6366F1);
 }
 
 // ============================================================================
-// 2. MODELOS DE DATOS
+// 2. MODELOS DE DATOS (DOMAIN LAYER)
 // ============================================================================
 
 class ConsolePlatform {
   final String id;
   final String name;
   final String brand;
-  final Color color; 
-  ConsolePlatform({required this.id, required this.name, required this.brand, required this.color});
+
+  ConsolePlatform({required this.id, required this.name, required this.brand});
 }
 
 class Rom {
@@ -75,7 +52,15 @@ class Rom {
   final String? coverUrl; 
   final List<DownloadLink> links;
 
-  Rom({required this.title, required this.platform, required this.regions, required this.romId, required this.slug, this.coverUrl, required this.links});
+  Rom({
+    required this.title,
+    required this.platform,
+    required this.regions,
+    required this.romId,
+    required this.slug,
+    this.coverUrl,
+    required this.links,
+  });
 
   factory Rom.fromJson(Map<String, dynamic> json) {
     return Rom(
@@ -84,7 +69,10 @@ class Rom {
       regions: (json['regions'] as List?)?.map((e) => e.toString()).toList() ?? [],
       romId: json['rom_id']?.toString() ?? '',
       slug: json['slug'] ?? '',
-      links: (json['links'] as List?)?.map((e) => DownloadLink.fromJson(e)).toList() ?? [],
+      links: (json['links'] as List?)
+              ?.map((e) => DownloadLink.fromJson(e))
+              .toList() ??
+          [],
     );
   }
 }
@@ -95,84 +83,176 @@ class DownloadLink {
   final String sizeStr;
   final String url;
   final String host;
-  DownloadLink({required this.name, required this.format, required this.sizeStr, required this.url, required this.host});
+
+  DownloadLink({
+    required this.name,
+    required this.format,
+    required this.sizeStr,
+    required this.url,
+    required this.host,
+  });
+
   factory DownloadLink.fromJson(Map<String, dynamic> json) {
     return DownloadLink(
-      name: json['name'] ?? 'file', format: json['format'] ?? '', sizeStr: json['size_str'] ?? '', url: json['url'] ?? '', host: json['host'] ?? '',
+      name: json['name'] ?? 'file',
+      format: json['format'] ?? '',
+      sizeStr: json['size_str'] ?? '',
+      url: json['url'] ?? '',
+      host: json['host'] ?? '',
     );
   }
 }
 
-class DownloadTaskModel {
+class DownloadTask {
   final String id;
   final String fileName;
-  final double progress;
+  final double progress; // 0.0 a 1.0
   final bool isDownloading;
   final bool isCompleted;
   final bool isError;
   final String statusMessage;
-  final String? finalPath;
 
-  DownloadTaskModel({required this.id, required this.fileName, this.progress = 0.0, this.isDownloading = false, this.isCompleted = false, this.isError = false, this.statusMessage = 'Pendiente', this.finalPath});
+  DownloadTask({
+    required this.id,
+    required this.fileName,
+    this.progress = 0.0,
+    this.isDownloading = false,
+    this.isCompleted = false,
+    this.isError = false,
+    this.statusMessage = 'Pendiente',
+  });
 
-  DownloadTaskModel copyWith({double? progress, bool? isDownloading, bool? isCompleted, bool? isError, String? statusMessage, String? finalPath}) {
-    return DownloadTaskModel(
-      id: id, fileName: fileName, progress: progress ?? this.progress, isDownloading: isDownloading ?? this.isDownloading, isCompleted: isCompleted ?? this.isCompleted, isError: isError ?? this.isError, statusMessage: statusMessage ?? this.statusMessage, finalPath: finalPath ?? this.finalPath,
+  DownloadTask copyWith({
+    double? progress,
+    bool? isDownloading,
+    bool? isCompleted,
+    bool? isError,
+    String? statusMessage,
+  }) {
+    return DownloadTask(
+      id: id,
+      fileName: fileName,
+      progress: progress ?? this.progress,
+      isDownloading: isDownloading ?? this.isDownloading,
+      isCompleted: isCompleted ?? this.isCompleted,
+      isError: isError ?? this.isError,
+      statusMessage: statusMessage ?? this.statusMessage,
     );
   }
 }
 
 // ============================================================================
-// 3. REPOSITORIOS
+// 3. REPOSITORIOS Y SERVICIOS (DATA LAYER)
 // ============================================================================
 
 class ApiService {
-  final Dio _dio = Dio(BaseOptions(baseUrl: kApiBaseUrl));
+  final Dio _dio = Dio(BaseOptions(
+    baseUrl: kApiBaseUrl,
+    connectTimeout: const Duration(seconds: 10),
+    receiveTimeout: const Duration(seconds: 30),
+  ));
 
-  Future<List<Rom>> searchRoms({required String query, List<String>? platforms}) async {
+  Future<List<Rom>> searchRoms({
+    required String query,
+    List<String>? platforms,
+    int page = 1,
+  }) async {
     try {
       final payload = {
-        "search_key": query, "max_results": 50, "page": 1,
+        "search_key": query,
+        "max_results": 50,
+        "page": page,
         if (platforms != null && platforms.isNotEmpty) "platforms": platforms,
       };
+
       final response = await _dio.post('/search', data: payload);
+      
       if (response.data != null && response.data['data'] != null) {
-        return (response.data['data']['results'] as List).map((e) => Rom.fromJson(e)).toList();
+        final List results = response.data['data']['results'] ?? [];
+        return results.map((e) => Rom.fromJson(e)).toList();
       }
       return [];
-    } catch (e) { return []; }
+    } catch (e) {
+      throw Exception('Error searching ROMs: $e');
+    }
   }
 
   List<ConsolePlatform> getInitialConsoles() {
     return [
-      ConsolePlatform(id: 'n64', name: 'Nintendo 64', brand: 'Nintendo', color: Colors.redAccent),
-      ConsolePlatform(id: 'nes', name: 'NES', brand: 'Nintendo', color: Colors.grey),
-      ConsolePlatform(id: 'snes', name: 'Super Nintendo', brand: 'Nintendo', color: Colors.purpleAccent),
-      ConsolePlatform(id: 'gba', name: 'Game Boy Advance', brand: 'Nintendo', color: Colors.indigoAccent),
-      ConsolePlatform(id: 'ps1', name: 'PlayStation', brand: 'Sony', color: Colors.blueGrey),
-      ConsolePlatform(id: 'genesis', name: 'Sega Genesis', brand: 'Sega', color: Colors.blueAccent),
-      ConsolePlatform(id: 'dreamcast', name: 'Dreamcast', brand: 'Sega', color: Colors.orangeAccent),
-      ConsolePlatform(id: 'nds', name: 'Nintendo DS', brand: 'Nintendo', color: Colors.pinkAccent),
-      ConsolePlatform(id: 'psp', name: 'PSP', brand: 'Sony', color: Colors.black),
+      ConsolePlatform(id: 'n64', name: 'Nintendo 64', brand: 'Nintendo'),
+      ConsolePlatform(id: 'nes', name: 'NES', brand: 'Nintendo'),
+      ConsolePlatform(id: 'snes', name: 'Super Nintendo', brand: 'Nintendo'),
+      ConsolePlatform(id: 'gba', name: 'Game Boy Advance', brand: 'Nintendo'),
+      ConsolePlatform(id: 'ps1', name: 'PlayStation', brand: 'Sony'),
+      ConsolePlatform(id: 'genesis', name: 'Sega Genesis', brand: 'Sega'),
+      ConsolePlatform(id: 'dreamcast', name: 'Dreamcast', brand: 'Sega'),
+      ConsolePlatform(id: 'nds', name: 'Nintendo DS', brand: 'Nintendo'),
+      ConsolePlatform(id: 'psp', name: 'PSP', brand: 'Sony'),
     ];
   }
 }
 
+class DownloadService {
+  final Dio _dio = Dio();
+
+  Future<void> downloadFile({
+    required String url,
+    required String fileName,
+    required Function(double) onProgress,
+    required Function(String path) onSuccess,
+    required Function(String error) onError,
+  }) async {
+    try {
+      Directory? dir;
+      if (Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
+        dir = await getDownloadsDirectory();
+      } else {
+        dir = await getApplicationDocumentsDirectory();
+      }
+
+      final savePath = '${dir?.path ?? ""}/$fileName';
+
+      await _dio.download(
+        url,
+        savePath,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            onProgress(received / total);
+          }
+        },
+      );
+      onSuccess(savePath);
+    } catch (e) {
+      onError(e.toString());
+    }
+  }
+}
+
 // ============================================================================
-// 4. GESTIÓN DE ESTADO (RIVERPOD)
+// 4. ESTADO (RIVERPOD NOTIFIERS)
 // ============================================================================
 
 final themeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.dark);
 final apiServiceProvider = Provider((ref) => ApiService());
+
+// Navegación principal (0 = Home/Consolas, 1 = Búsqueda)
 final navIndexProvider = StateProvider<int>((ref) => 0);
 
 class SearchState {
   final bool isLoading;
   final List<Rom> results;
+  final String? error;
   final String activePlatformFilter; 
-  SearchState({this.isLoading = false, this.results = const [], this.activePlatformFilter = ''});
-  SearchState copyWith({bool? isLoading, List<Rom>? results, String? activePlatformFilter}) {
-    return SearchState(isLoading: isLoading ?? this.isLoading, results: results ?? this.results, activePlatformFilter: activePlatformFilter ?? this.activePlatformFilter);
+
+  SearchState({this.isLoading = false, this.results = const [], this.error, this.activePlatformFilter = ''});
+
+  SearchState copyWith({bool? isLoading, List<Rom>? results, String? error, String? activePlatformFilter}) {
+    return SearchState(
+      isLoading: isLoading ?? this.isLoading,
+      results: results ?? this.results,
+      error: error,
+      activePlatformFilter: activePlatformFilter ?? this.activePlatformFilter,
+    );
   }
 }
 
@@ -181,406 +261,501 @@ class SearchNotifier extends StateNotifier<SearchState> {
   SearchNotifier(this._api) : super(SearchState());
 
   Future<void> search(String query) async {
+    // Permitir búsqueda vacía si hay un filtro de plataforma para mostrar "populares" o similar (si la API lo soportara)
+    // Para esta API, necesitamos query o plataforma.
     if (query.isEmpty && state.activePlatformFilter.isEmpty) return;
-    state = state.copyWith(isLoading: true);
+
+    state = state.copyWith(isLoading: true, error: null);
     try {
       List<String>? platforms;
-      if (state.activePlatformFilter.isNotEmpty) platforms = [state.activePlatformFilter];
+      if (state.activePlatformFilter.isNotEmpty) {
+        platforms = [state.activePlatformFilter];
+      }
+      
+      // Si la query está vacía pero hay plataforma, enviamos un término genérico o manejamos según API
+      // Aquí asumimos que el usuario escribe algo. 
       final results = await _api.searchRoms(query: query.isEmpty ? "mario" : query, platforms: platforms);
       state = state.copyWith(isLoading: false, results: results);
-    } catch (e) { state = state.copyWith(isLoading: false); }
+    } catch (e) {
+      state = state.copyWith(isLoading: false, error: e.toString());
+    }
   }
 
-  void setPlatformFilter(String platformId) => state = state.copyWith(activePlatformFilter: platformId, results: []); 
-  void clearFilter() => state = state.copyWith(activePlatformFilter: '', results: []);
+  void setPlatformFilter(String platformId) {
+    state = state.copyWith(activePlatformFilter: platformId, results: []); // Limpiar resultados al cambiar filtro
+  }
+
+  void clearFilter() {
+    state = state.copyWith(activePlatformFilter: '', results: []);
+  }
 }
 
-final searchProvider = StateNotifierProvider<SearchNotifier, SearchState>((ref) => SearchNotifier(ref.read(apiServiceProvider)));
+final searchProvider = StateNotifierProvider<SearchNotifier, SearchState>((ref) {
+  return SearchNotifier(ref.read(apiServiceProvider));
+});
 
-class DownloadNotifier extends StateNotifier<List<DownloadTaskModel>> {
+// Download Manager
+class DownloadNotifier extends StateNotifier<List<DownloadTask>> {
+  final DownloadService _service = DownloadService();
   DownloadNotifier() : super([]);
 
-  /// NUEVO: Inicializa el gestor y limpia tareas estancadas
-  Future<void> initializeDownloader() async {
-    final tasks = await FlutterDownloader.loadTasks();
-    if (tasks != null) {
-      final List<DownloadTaskModel> activeTasks = [];
-      for (var task in tasks) {
-        if (task.status == DownloadTaskStatus.failed ||
-            task.status == DownloadTaskStatus.canceled ||
-            task.status == DownloadTaskStatus.undefined) {
-          // Eliminamos la tarea del registro nativo
-          await FlutterDownloader.remove(taskId: task.taskId);
-        } else {
-          // Mapeamos las tareas activas o completadas
-          activeTasks.add(DownloadTaskModel(
-            id: task.taskId,
-            fileName: task.filename ?? 'unknown_file',
-            progress: task.progress / 100.0,
-            isDownloading: task.status == DownloadTaskStatus.running || task.status == DownloadTaskStatus.enqueued,
-            isCompleted: task.status == DownloadTaskStatus.complete,
-            isError: task.status == DownloadTaskStatus.failed,
-            statusMessage: _getStatusMessage(task.status, task.progress),
-          ));
-        }
-      }
-      state = activeTasks;
-    }
-  }
+  void startDownload(DownloadLink link) {
+    final task = DownloadTask(
+      id: DateTime.now().toString(),
+      fileName: link.name.isNotEmpty ? link.name : 'download.zip',
+      isDownloading: true,
+      statusMessage: 'Iniciando...',
+    );
 
-  void updateFromBackground(String id, int status, int progress) {
-    final taskStatus = DownloadTaskStatus.fromInt(status);
-    
-    // Si terminó la descarga en la carpeta privada, iniciamos el movimiento a la pública
-    if (taskStatus == DownloadTaskStatus.complete) {
-       _finalizeAndroidDownload(id);
-    }
+    state = [...state, task];
 
-    state = [
-      for (final t in state)
-        if (t.id == id)
-          t.copyWith(
-            progress: progress / 100.0,
-            isDownloading: taskStatus == DownloadTaskStatus.running || taskStatus == DownloadTaskStatus.enqueued,
-            isCompleted: taskStatus == DownloadTaskStatus.complete,
-            isError: taskStatus == DownloadTaskStatus.failed,
-            statusMessage: _getStatusMessage(taskStatus, progress),
-          )
-        else t
-    ];
-  }
-
-  Future<void> _finalizeAndroidDownload(String taskId) async {
-    final taskIndex = state.indexWhere((t) => t.id == taskId);
-    if (taskIndex == -1) return;
-    final task = state[taskIndex];
-
-    try {
-      final appDir = await getApplicationSupportDirectory();
-      final sourceFile = File('${appDir.path}/${task.fileName}');
-      if (!await sourceFile.exists()) return;
-
-      final documentsPath = await ExternalPath.getExternalStoragePublicDirectory(ExternalPath.DIRECTORY_DOCUMENTS);
-      final targetDir = Directory('$documentsPath/RomsDownloader');
-      if (!await targetDir.exists()) await targetDir.create(recursive: true);
-
-      final targetFile = File('${targetDir.path}/${task.fileName}');
-      
-      // Copiar a la carpeta pública y borrar la copia privada
-      await sourceFile.copy(targetFile.path);
-      await sourceFile.delete();
-
-      state = [
-        for (final t in state)
-          if (t.id == taskId) t.copyWith(statusMessage: 'Guardado en Docs/RomsDownloader', finalPath: targetFile.path) else t
-      ];
-    } catch (e) {
-      state = [
-        for (final t in state)
-          if (t.id == taskId) t.copyWith(statusMessage: 'Error moviendo archivo') else t
-      ];
-    }
-  }
-
-  String _getStatusMessage(DownloadTaskStatus status, int progress) {
-    if (status == DownloadTaskStatus.enqueued) return "En cola...";
-    if (status == DownloadTaskStatus.running) return "Descargando $progress%";
-    if (status == DownloadTaskStatus.complete) return "Procesando...";
-    if (status == DownloadTaskStatus.failed) return "Falló";
-    return "Pendiente";
-  }
-
-  Future<void> startDownload(DownloadLink link) async {
-    if (Platform.isAndroid) {
-      // Pedimos los permisos necesarios
-      if (await Permission.manageExternalStorage.request().isDenied) {
-         await Permission.storage.request();
-      }
-      final appDir = await getApplicationSupportDirectory();
-      final fileName = link.name.isNotEmpty ? link.name : 'download_${DateTime.now().millisecondsSinceEpoch}.zip';
-
-      final taskId = await FlutterDownloader.enqueue(
-        url: link.url, savedDir: appDir.path, fileName: fileName,
-        showNotification: true, openFileFromNotification: false, saveInPublicStorage: false,
-      );
-
-      if (taskId != null) {
-        state = [...state, DownloadTaskModel(id: taskId, fileName: fileName, isDownloading: true, statusMessage: 'Iniciando...')];
-      }
-      return;
-    }
-    // Desktop logic omitted
+    _service.downloadFile(
+      url: link.url,
+      fileName: task.fileName,
+      onProgress: (progress) {
+        state = [
+          for (final t in state)
+            if (t.id == task.id) t.copyWith(progress: progress, statusMessage: 'Descargando ${(progress * 100).toInt()}%') else t
+        ];
+      },
+      onSuccess: (path) {
+        state = [
+          for (final t in state)
+            if (t.id == task.id) 
+              t.copyWith(progress: 1.0, isDownloading: false, isCompleted: true, statusMessage: 'Completado: $path') 
+            else t
+        ];
+      },
+      onError: (err) {
+        state = [
+          for (final t in state)
+            if (t.id == task.id) 
+              t.copyWith(isDownloading: false, isError: true, statusMessage: 'Error: $err') 
+            else t
+        ];
+      },
+    );
   }
 }
 
-final downloadsProvider = StateNotifierProvider<DownloadNotifier, List<DownloadTaskModel>>((ref) => DownloadNotifier());
-final activeDownloadsCountProvider = Provider<int>((ref) => ref.watch(downloadsProvider).where((t) => t.isDownloading).length);
+final downloadsProvider = StateNotifierProvider<DownloadNotifier, List<DownloadTask>>((ref) => DownloadNotifier());
+
+// Computed Provider para saber si hay descargas activas
+final activeDownloadsCountProvider = Provider<int>((ref) {
+  final tasks = ref.watch(downloadsProvider);
+  return tasks.where((t) => t.isDownloading).length;
+});
 
 // ============================================================================
-// 5. LISTENER DE PUERTO
+// 5. WIDGETS UI PERSONALIZADOS
 // ============================================================================
 
-class DownloadPortListener extends ConsumerStatefulWidget {
+class RetroBackground extends StatelessWidget {
   final Widget child;
-  const DownloadPortListener({super.key, required this.child});
-  @override
-  ConsumerState<DownloadPortListener> createState() => _DownloadPortListenerState();
-}
-
-class _DownloadPortListenerState extends ConsumerState<DownloadPortListener> {
-  final ReceivePort _port = ReceivePort();
-  @override
-  void initState() {
-    super.initState();
-    if (Platform.isAndroid || Platform.isIOS) {
-      IsolateNameServer.registerPortWithName(_port.sendPort, 'downloader_send_port');
-      _port.listen((dynamic data) => ref.read(downloadsProvider.notifier).updateFromBackground(data[0], data[1], data[2]));
-      FlutterDownloader.registerCallback(downloadCallback);
-      
-      // Llamamos al inicializador en el primer frame para limpiar tareas estancadas
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-         ref.read(downloadsProvider.notifier).initializeDownloader();
-      });
-    }
-  }
-  @override
-  void dispose() {
-    if (Platform.isAndroid || Platform.isIOS) IsolateNameServer.removePortNameMapping('downloader_send_port');
-    super.dispose();
-  }
-  @override
-  Widget build(BuildContext context) => widget.child;
-}
-
-// ============================================================================
-// 6. UI MODERNA MATERIAL 3
-// ============================================================================
-
-class CrocDbApp extends ConsumerWidget {
-  const CrocDbApp({super.key});
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final themeMode = ref.watch(themeProvider);
-    
-    return MaterialApp(
-      title: 'CrocDB',
-      debugShowCheckedModeBanner: false,
-      themeMode: themeMode,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.light,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: AppColors.lightPrimary,
-          brightness: Brightness.light,
-          surface: AppColors.lightBg,
-        ),
-        textTheme: GoogleFonts.outfitTextTheme(ThemeData.light().textTheme),
-        navigationBarTheme: const NavigationBarThemeData(
-          labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
-        )
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: AppColors.darkBg,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: AppColors.primaryNeon,
-          brightness: Brightness.dark,
-          surface: AppColors.darkBg,
-        ),
-        textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
-        navigationBarTheme: NavigationBarThemeData(
-          backgroundColor: AppColors.darkSurface,
-          indicatorColor: AppColors.primaryNeon.withOpacity(0.2),
-          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        )
-      ),
-      home: const DownloadPortListener(child: MainLayoutScreen()),
-    );
-  }
-}
-
-class MainLayoutScreen extends ConsumerWidget {
-  const MainLayoutScreen({super.key});
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final idx = ref.watch(navIndexProvider);
-    final activeDownloads = ref.watch(activeDownloadsCountProvider);
-
-    return Scaffold(
-      body: IndexedStack(
-        index: idx,
-        children: const [
-          HomeConsolesTab(),
-          SearchRomTab(),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: idx,
-        onDestinationSelected: (i) {
-          if (i == 0) ref.read(searchProvider.notifier).clearFilter();
-          ref.read(navIndexProvider.notifier).state = i;
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.gamepad_outlined),
-            selectedIcon: Icon(Icons.gamepad),
-            label: 'Plataformas',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.search_outlined),
-            selectedIcon: Icon(Icons.search),
-            label: 'Explorar',
-          ),
-        ],
-      ),
-      floatingActionButton: activeDownloads > 0 || idx == 1 ? FloatingActionButton(
-        onPressed: () => _showDownloads(context),
-        child: Badge(
-          isLabelVisible: activeDownloads > 0,
-          label: Text(activeDownloads.toString()),
-          child: const Icon(Icons.download),
-        ),
-      ) : null,
-    );
-  }
-
-  void _showDownloads(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (ctx) => const DownloadsSheet(),
-    );
-  }
-}
-
-// ----------------------------------------------------------------------------
-// PESTAÑA 1: HOME (CONSOLAS)
-// ----------------------------------------------------------------------------
-
-class HomeConsolesTab extends ConsumerWidget {
-  const HomeConsolesTab({super.key});
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final consoles = ref.read(apiServiceProvider).getInitialConsoles();
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return CustomScrollView(
-      slivers: [
-        SliverAppBar.large(
-          title: Text("Plataformas", style: GoogleFonts.orbitron(fontWeight: FontWeight.w900)),
-          actions: [
-             IconButton(
-              icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode),
-              onPressed: () => ref.read(themeProvider.notifier).state = isDark ? ThemeMode.light : ThemeMode.dark,
-            ),
-          ],
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.all(16),
-          sliver: SliverGrid(
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 200, 
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 0.85,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (ctx, i) => ConsoleCard(
-                console: consoles[i], 
-                onTap: () {
-                  ref.read(searchProvider.notifier).setPlatformFilter(consoles[i].id);
-                  ref.read(navIndexProvider.notifier).state = 1;
-                }
-              ).animate().fadeIn(delay: (50 * i).ms).scale(),
-              childCount: consoles.length,
-            ),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 80)),
-      ],
-    );
-  }
-}
-
-class ConsoleCard extends StatelessWidget {
-  final ConsolePlatform console;
-  final VoidCallback onTap;
-  const ConsoleCard({super.key, required this.console, required this.onTap});
+  const RetroBackground({super.key, required this.child});
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     
-    return Card(
-      elevation: 0,
-      color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.5),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(kBorderRadius),
-        side: BorderSide(color: theme.colorScheme.outline.withOpacity(0.1)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Stack(
-          children: [
-            Positioned.fill(
+    return Stack(
+      children: [
+        Container(color: Theme.of(context).scaffoldBackgroundColor),
+        if (isDark)
+          Positioned.fill(
+            child: Opacity(
+              opacity: 0.05,
+              child: CustomPaint(painter: GridPainter(color: AppColors.neonCyan)),
+            ),
+          ),
+        Positioned(
+          top: -100, right: -100,
+          child: _buildBlurBlob(isDark ? AppColors.neonPurple : AppColors.lightAccent),
+        ),
+        Positioned(
+          bottom: -100, left: -100,
+          child: _buildBlurBlob(isDark ? AppColors.neonCyan : Colors.blueAccent),
+        ),
+        child,
+        if (isDark)
+          Positioned.fill(
+            child: IgnorePointer(
               child: Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      console.color.withOpacity(0.1),
-                      Colors.transparent,
-                    ],
+                    begin: Alignment.topCenter, end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, Colors.black.withOpacity(0.02)],
+                    stops: const [0.5, 0.5], tileMode: TileMode.repeated,
                   ),
                 ),
               ),
             ),
-            Positioned(
-              right: -20,
-              bottom: -20,
-              child: Icon(
-                FontAwesomeIcons.gamepad,
-                size: 100,
-                color: console.color.withOpacity(0.1),
-              ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildBlurBlob(Color color) {
+    return Container(
+      width: 400, height: 400,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color.withOpacity(0.2)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 80, sigmaY: 80),
+        child: Container(color: Colors.transparent),
+      ),
+    );
+  }
+}
+
+class GridPainter extends CustomPainter {
+  final Color color;
+  GridPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color..strokeWidth = 1;
+    const double spacing = 40;
+    for (double i = 0; i < size.width; i += spacing) {
+      canvas.drawLine(Offset(i, 0), Offset(i, size.height), paint);
+    }
+    for (double i = 0; i < size.height; i += spacing) {
+      canvas.drawLine(Offset(0, i), Offset(size.width, i), paint);
+    }
+  }
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class GlassCard extends StatelessWidget {
+  final Widget child;
+  final double opacity;
+  final EdgeInsets? padding;
+  final VoidCallback? onTap;
+
+  const GlassCard({super.key, required this.child, this.opacity = 0.05, this.padding, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    Widget content = Container(
+      padding: padding ?? const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: (isDark ? Colors.white : Colors.black).withOpacity(opacity),
+        borderRadius: BorderRadius.circular(kBorderRadius),
+        border: Border.all(color: (isDark ? Colors.white : Colors.black).withOpacity(0.1)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16, spreadRadius: -4, offset: const Offset(0, 10))],
+      ),
+      child: child,
+    );
+    if (onTap != null) {
+      content = InkWell(onTap: onTap, borderRadius: BorderRadius.circular(kBorderRadius), child: content);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(kBorderRadius),
+      child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10), child: content),
+    );
+  }
+}
+
+class Console3DCard extends StatefulWidget {
+  final ConsolePlatform console;
+  final VoidCallback onTap;
+
+  const Console3DCard({super.key, required this.console, required this.onTap});
+
+  @override
+  State<Console3DCard> createState() => _Console3DCardState();
+}
+
+class _Console3DCardState extends State<Console3DCard> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          transform: Matrix4.identity()..scale(_isHovered ? 1.05 : 1.0)..translate(0.0, _isHovered ? -5.0 : 0.0),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            gradient: LinearGradient(
+              colors: [
+                isDark ? const Color(0xFF1E1E2C) : Colors.white,
+                isDark ? const Color(0xFF161622) : Colors.grey.shade100
+              ],
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
             ),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.end,
+            boxShadow: [
+              BoxShadow(
+                color: _isHovered ? (isDark ? AppColors.neonCyan.withOpacity(0.3) : Colors.blue.withOpacity(0.2)) : Colors.black.withOpacity(0.1),
+                blurRadius: _isHovered ? 20 : 10, offset: Offset(0, _isHovered ? 10 : 5),
+              ),
+            ],
+            border: Border.all(color: _isHovered ? (isDark ? AppColors.neonCyan : Colors.blue) : Colors.transparent, width: 1.5),
+          ),
+          child: Stack(
+            children: [
+              Positioned(
+                right: -20, bottom: -20,
+                child: Opacity(
+                  opacity: 0.1,
+                  child: Icon(FontAwesomeIcons.gamepad, size: 80, color: isDark ? Colors.white : Colors.black),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Text(
+                      widget.console.id.toUpperCase(),
+                      style: GoogleFonts.orbitron(fontSize: 22, fontWeight: FontWeight.bold, color: isDark ? AppColors.neonCyan : AppColors.lightAccent),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      widget.console.name,
+                      style: GoogleFonts.rajdhani(fontSize: 14, fontWeight: FontWeight.w500, color: isDark ? Colors.grey : Colors.grey.shade700),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Botón de Descarga Flotante Global
+class GlobalDownloadButton extends ConsumerWidget {
+  const GlobalDownloadButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeCount = ref.watch(activeDownloadsCountProvider);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return FloatingActionButton(
+      onPressed: () {
+        showModalBottomSheet(
+          context: context,
+          backgroundColor: Colors.transparent,
+          isScrollControlled: true,
+          builder: (ctx) => const DownloadsSheet(),
+        );
+      },
+      backgroundColor: isDark ? AppColors.neonPurple : AppColors.lightAccent,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          const Icon(Icons.download_rounded, color: Colors.white),
+          if (activeCount > 0)
+            Positioned(
+              right: 0,
+              top: 0,
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                child: Text(
+                  activeCount.toString(),
+                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ).animate().scale(duration: 300.ms, curve: Curves.elasticOut),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// 6. PANTALLAS (UI PRESENTATION)
+// ============================================================================
+
+void main() {
+  runApp(const ProviderScope(child: CrocDbApp()));
+}
+
+class CrocDbApp extends ConsumerWidget {
+  const CrocDbApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeProvider);
+
+    return MaterialApp(
+      title: 'Retired64 - CROCDB',
+      debugShowCheckedModeBanner: false,
+      themeMode: themeMode,
+      theme: ThemeData(
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: AppColors.lightBg,
+        primaryColor: AppColors.lightAccent,
+        textTheme: GoogleFonts.rajdhaniTextTheme(ThemeData.light().textTheme),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: AppColors.darkBg,
+        primaryColor: AppColors.neonCyan,
+        textTheme: GoogleFonts.rajdhaniTextTheme(ThemeData.dark().textTheme).apply(
+          bodyColor: Colors.white,
+          displayColor: Colors.white,
+        ),
+        useMaterial3: true,
+      ),
+      home: const MainLayoutScreen(),
+    );
+  }
+}
+
+// Nueva Pantalla Principal con Navegación por Pestañas
+class MainLayoutScreen extends ConsumerWidget {
+  const MainLayoutScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final currentIndex = ref.watch(navIndexProvider);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Scaffold(
+      extendBody: true, // Para que el fondo retro cubra todo
+      extendBodyBehindAppBar: true,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(70),
+        child: ClipRRect(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: AppBar(
+              backgroundColor: Theme.of(context).scaffoldBackgroundColor.withOpacity(0.5),
+              elevation: 0,
+              title: Row(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surface,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(FontAwesomeIcons.gamepad, color: console.color, size: 20),
-                  ),
-                  const Spacer(),
+                  Icon(FontAwesomeIcons.dragon, color: isDark ? AppColors.neonMagenta : AppColors.lightAccent),
+                  const SizedBox(width: 10),
                   Text(
-                    console.id.toUpperCase(),
-                    style: GoogleFonts.orbitron(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      color: theme.colorScheme.onSurface,
-                    ),
-                  ),
-                  Text(
-                    console.name,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    "RETIRED64 - CROCDB",
+                    style: GoogleFonts.orbitron(fontWeight: FontWeight.w900, letterSpacing: 2),
                   ),
                 ],
+              ),
+              actions: [
+                IconButton(
+                  icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode),
+                  onPressed: () => ref.read(themeProvider.notifier).state = isDark ? ThemeMode.light : ThemeMode.dark,
+                ),
+                const SizedBox(width: 16),
+              ],
+            ),
+          ),
+        ),
+      ),
+      body: RetroBackground(
+        child: IndexedStack(
+          index: currentIndex,
+          children: const [
+            HomeConsolesTab(),
+            SearchRomTab(),
+          ],
+        ),
+      ),
+      bottomNavigationBar: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: NavigationBar(
+            height: 70,
+            backgroundColor: (isDark ? AppColors.darkSurface : Colors.white).withOpacity(0.8),
+            selectedIndex: currentIndex,
+            onDestinationSelected: (index) {
+              // Si volvemos a Home, limpiamos filtros
+              if (index == 0) {
+                 ref.read(searchProvider.notifier).clearFilter();
+              }
+              ref.read(navIndexProvider.notifier).state = index;
+            },
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.gamepad_outlined),
+                selectedIcon: Icon(Icons.gamepad),
+                label: 'Plataformas',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.search_outlined),
+                selectedIcon: Icon(Icons.search),
+                label: 'Búsqueda',
+              ),
+            ],
+          ),
+        ),
+      ),
+      floatingActionButton: const GlobalDownloadButton(), // Botón siempre disponible
+    );
+  }
+}
+
+// TAB 1: Consolas
+class HomeConsolesTab extends ConsumerWidget {
+  const HomeConsolesTab({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final consoles = ref.read(apiServiceProvider).getInitialConsoles();
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 20),
+            Text(
+              "EXPLORA PLATAFORMAS",
+              style: GoogleFonts.orbitron(
+                fontSize: 24,
+                color: isDark ? Colors.white : Colors.black87,
+                letterSpacing: 1.5,
+              ),
+            ).animate().fadeIn().slideX(),
+            const SizedBox(height: 8),
+            Text(
+              "Selecciona una consola para buscar tus juegos favoritos.",
+              style: TextStyle(color: isDark ? Colors.grey : Colors.grey.shade700),
+            ),
+            const SizedBox(height: 20),
+            Expanded(
+              child: GridView.builder(
+                padding: const EdgeInsets.only(bottom: 100),
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 200,
+                  childAspectRatio: 1.0,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 16,
+                ),
+                itemCount: consoles.length,
+                itemBuilder: (context, index) {
+                  final console = consoles[index];
+                  return Console3DCard(
+                    console: console,
+                    onTap: () {
+                      // 1. Establecer filtro
+                      ref.read(searchProvider.notifier).setPlatformFilter(console.id);
+                      // 2. Realizar búsqueda inicial (opcional, para "todos los juegos" de esa consola)
+                      ref.read(searchProvider.notifier).search("mario"); // Búsqueda por defecto o dejar vacío
+                      // 3. Cambiar a Tab de Búsqueda
+                      ref.read(navIndexProvider.notifier).state = 1;
+                    },
+                  ).animate().fadeIn(delay: Duration(milliseconds: 50 * index)).slideY(begin: 0.1);
+                },
               ),
             ),
           ],
@@ -590,141 +765,204 @@ class ConsoleCard extends StatelessWidget {
   }
 }
 
-// ----------------------------------------------------------------------------
-// PESTAÑA 2: BÚSQUEDA Y RESULTADOS
-// ----------------------------------------------------------------------------
-
+// TAB 2: Búsqueda
 class SearchRomTab extends ConsumerStatefulWidget {
   const SearchRomTab({super.key});
+
   @override
   ConsumerState<SearchRomTab> createState() => _SearchRomTabState();
 }
 
 class _SearchRomTabState extends ConsumerState<SearchRomTab> {
-  final TextEditingController _ctrl = TextEditingController();
+  final TextEditingController _searchCtrl = TextEditingController();
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(searchProvider);
-    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final searchState = ref.watch(searchProvider);
 
-    return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar.medium(
-            title: Text("Explorar", style: GoogleFonts.orbitron(fontWeight: FontWeight.bold)),
-            bottom: PreferredSize(
-              preferredSize: const Size.fromHeight(70),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Column(
-                  children: [
-                    SearchBar(
-                      controller: _ctrl,
-                      hintText: "Busca juegos (ej. Zelda)",
-                      leading: const Icon(Icons.search),
-                      onSubmitted: (val) => ref.read(searchProvider.notifier).search(val),
-                      trailing: [
-                        IconButton(
-                          icon: const Icon(Icons.arrow_forward),
-                          onPressed: () => ref.read(searchProvider.notifier).search(_ctrl.text),
-                        )
-                      ],
-                      elevation: const WidgetStatePropertyAll(0),
-                      backgroundColor: WidgetStatePropertyAll(theme.colorScheme.surfaceContainerHigh),
-                    ),
-                    if (state.activePlatformFilter.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8.0),
-                        child: Row(
-                          children: [
-                            InputChip(
-                              label: Text("Filtro: ${state.activePlatformFilter.toUpperCase()}"),
-                              onDeleted: () => ref.read(searchProvider.notifier).clearFilter(),
-                              selected: true,
-                            ),
-                          ],
-                        ),
-                      )
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 20),
+            // Barra de Búsqueda
+            Center(
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 600),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: [
+                    BoxShadow(
+                      color: isDark ? AppColors.neonCyan.withOpacity(0.2) : Colors.black12,
+                      blurRadius: 20,
+                      spreadRadius: 2,
+                    )
                   ],
+                ),
+                child: TextField(
+                  controller: _searchCtrl,
+                  onSubmitted: (value) => ref.read(searchProvider.notifier).search(value),
+                  style: const TextStyle(fontSize: 18),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: isDark ? AppColors.darkSurface : Colors.white,
+                    hintText: 'Busca tu juego (ej. Zelda)...',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.arrow_forward),
+                      onPressed: () => ref.read(searchProvider.notifier).search(_searchCtrl.text),
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(30),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                  ),
                 ),
               ),
             ),
-          ),
-          
-          if (state.isLoading)
-             const SliverFillRemaining(child: Center(child: CircularProgressIndicator())),
-          
-          if (!state.isLoading && state.results.isEmpty)
-             SliverFillRemaining(
-               child: Center(
-                 child: Column(
-                   mainAxisAlignment: MainAxisAlignment.center,
-                   children: [
-                     Icon(Icons.search_off, size: 64, color: theme.colorScheme.outline),
-                     const SizedBox(height: 16),
-                     const Text("Sin resultados"),
-                   ],
+
+            const SizedBox(height: 20),
+
+            // Chips de Filtro Activo
+            if (searchState.activePlatformFilter.isNotEmpty)
+              Row(
+                children: [
+                  Text("Filtrando por:", style: TextStyle(color: isDark ? Colors.grey : Colors.grey.shade700)),
+                  const SizedBox(width: 10),
+                  Chip(
+                    label: Text(searchState.activePlatformFilter.toUpperCase()),
+                    backgroundColor: isDark ? AppColors.neonPurple.withOpacity(0.2) : AppColors.lightAccent.withOpacity(0.1),
+                    deleteIcon: const Icon(Icons.close, size: 18),
+                    onDeleted: () {
+                      ref.read(searchProvider.notifier).clearFilter();
+                    },
+                  ).animate().scale(),
+                ],
+              ),
+
+            const SizedBox(height: 10),
+
+            // Lista de Resultados
+            if (searchState.isLoading)
+              const Expanded(child: Center(child: CircularProgressIndicator())),
+            
+            if (!searchState.isLoading && searchState.results.isEmpty && searchState.error == null)
+               Expanded(
+                 child: Center(
+                   child: Column(
+                     mainAxisAlignment: MainAxisAlignment.center,
+                     children: [
+                       Icon(Icons.search_off, size: 60, color: Colors.grey.withOpacity(0.5)),
+                       const SizedBox(height: 10),
+                       const Text("Realiza una búsqueda para ver resultados"),
+                     ],
+                   ),
                  ),
                ),
-             ),
 
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (ctx, i) {
-                final rom = state.results[i];
-                return RomListItem(rom: rom).animate().fadeIn(delay: (30 * i).ms).slideX();
-              },
-              childCount: state.results.length,
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 80)),
-        ],
+            if (searchState.results.isNotEmpty)
+              Expanded(
+                child: ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 100),
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: searchState.results.length,
+                  itemBuilder: (context, index) {
+                    final rom = searchState.results[index];
+                    return RomListCard(rom: rom)
+                        .animate()
+                        .fadeIn(delay: Duration(milliseconds: 50 * index))
+                        .slideX(begin: 0.1);
+                  },
+                ),
+              ),
+              
+             if (searchState.error != null)
+               Expanded(child: Center(child: Text("Error: ${searchState.error}", style: const TextStyle(color: Colors.red)))),
+          ],
+        ),
       ),
     );
   }
 }
 
-class RomListItem extends StatelessWidget {
+class RomListCard extends StatelessWidget {
   final Rom rom;
-  const RomListItem({super.key, required this.rom});
+  const RomListCard({super.key, required this.rom});
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      onTap: () {
-        Navigator.push(context, MaterialPageRoute(builder: (context) => RomDetailScreen(rom: rom)));
-      },
-      leading: Container(
-        width: 50, height: 50,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primaryContainer,
-          borderRadius: BorderRadius.circular(12),
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        opacity: isDark ? 0.05 : 0.6,
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (context) => RomDetailScreen(rom: rom)),
+          );
+        },
+        child: Row(
+          children: [
+            Container(
+              width: 60, height: 60,
+              decoration: BoxDecoration(
+                color: isDark ? AppColors.neonPurple.withOpacity(0.2) : Colors.blue.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Center(
+                child: Icon(FontAwesomeIcons.gamepad, color: isDark ? AppColors.neonCyan : AppColors.lightAccent),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    rom.title,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      _buildBadge(context, rom.platform.toUpperCase(), Colors.purple),
+                      const SizedBox(width: 8),
+                      if (rom.regions.isNotEmpty)
+                        _buildBadge(context, rom.regions.first.toUpperCase(), Colors.teal),
+                    ],
+                  )
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, color: isDark ? Colors.white54 : Colors.black54),
+          ],
         ),
-        child: Center(
-          child: Icon(FontAwesomeIcons.compactDisc, color: theme.colorScheme.onPrimaryContainer),
-        ),
       ),
-      title: Text(
-        rom.title,
-        style: const TextStyle(fontWeight: FontWeight.bold),
-        maxLines: 1, overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _buildBadge(BuildContext context, String text, MaterialColor color) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withOpacity(0.5), width: 0.5),
       ),
-      subtitle: Text(
-        "${rom.platform.toUpperCase()} • ${rom.regions.join(', ')}",
-        style: TextStyle(color: theme.colorScheme.outline),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 10, color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold),
       ),
-      trailing: const Icon(Icons.chevron_right),
     );
   }
 }
-
-// ----------------------------------------------------------------------------
-// PANTALLA DETALLES
-// ----------------------------------------------------------------------------
 
 class RomDetailScreen extends ConsumerWidget {
   final Rom rom;
@@ -732,169 +970,245 @@ class RomDetailScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar.large(
-            title: Text(rom.title),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.share),
-                onPressed: () {},
-              )
-            ],
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Badges
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      Chip(label: Text(rom.platform.toUpperCase()), avatar: const Icon(Icons.gamepad, size: 16)),
-                      if (rom.regions.isNotEmpty)
-                        Chip(label: Text(rom.regions.first), avatar: const Icon(Icons.public, size: 16)),
-                    ],
+      floatingActionButton: const GlobalDownloadButton(), // Botón de descarga también aquí
+      body: RetroBackground(
+        child: CustomScrollView(
+          physics: const BouncingScrollPhysics(),
+          slivers: [
+            SliverAppBar(
+              expandedHeight: 200,
+              pinned: true,
+              backgroundColor: Colors.transparent,
+              leading: Container(
+                margin: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black26, shape: BoxShape.circle,
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Colors.white),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ),
+              flexibleSpace: FlexibleSpaceBar(
+                title: Text(
+                  rom.title,
+                  style: GoogleFonts.rajdhani(
+                    fontWeight: FontWeight.bold,
+                    shadows: [const Shadow(blurRadius: 10, color: Colors.black)],
                   ),
-                  const SizedBox(height: 24),
-                  
-                  Text("Información", style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  _InfoRow(label: "ID", value: rom.romId),
-                  _InfoRow(label: "Slug", value: rom.slug),
-                  
-                  const SizedBox(height: 32),
-                  Text("Descargas Disponibles", style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  
-                  if (rom.links.isEmpty)
-                    const Text("No hay enlaces disponibles")
-                  else
-                    ...rom.links.map((link) => Padding(
-                      padding: const EdgeInsets.only(bottom: 8.0),
-                      child: Card(
-                        elevation: 0,
-                        color: theme.colorScheme.surfaceContainer,
-                        child: ListTile(
-                          leading: const Icon(Icons.file_download),
-                          title: Text(link.name.isEmpty ? "Archivo ROM" : link.name),
-                          subtitle: Text("${link.format} • ${link.sizeStr}"),
-                          trailing: FilledButton.tonalIcon(
-                            icon: const Icon(Icons.download),
-                            label: const Text("Bajar"),
-                            onPressed: () {
-                              ref.read(downloadsProvider.notifier).startDownload(link);
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Añadido a descargas")));
-                            },
-                          ),
+                ),
+                background: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            isDark ? AppColors.neonPurple : Colors.blue,
+                            isDark ? AppColors.neonCyan : Colors.purple,
+                          ],
+                          begin: Alignment.topLeft, end: Alignment.bottomRight,
                         ),
                       ),
-                    )),
-                  
-                   const SizedBox(height: 80),
-                ],
+                    ),
+                    BackdropFilter(filter: ImageFilter.blur(sigmaX: 0, sigmaY: 0), child: Container(color: Colors.black.withOpacity(0.3))),
+                    Center(child: Icon(FontAwesomeIcons.compactDisc, size: 100, color: Colors.white.withOpacity(0.2))),
+                  ],
+                ),
               ),
             ),
-          )
-        ],
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("INFORMACIÓN", style: GoogleFonts.orbitron(fontSize: 18, color: isDark ? AppColors.neonCyan : AppColors.lightAccent)),
+                    const SizedBox(height: 10),
+                    GlassCard(
+                      child: Column(
+                        children: [
+                          _buildInfoRow("Plataforma", rom.platform.toUpperCase()),
+                          _buildInfoRow("Regiones", rom.regions.join(", ")),
+                          _buildInfoRow("ID", rom.romId),
+                          _buildInfoRow("Slug", rom.slug),
+                        ],
+                      ),
+                    ).animate().slideY(begin: 0.2, duration: 400.ms),
+
+                    const SizedBox(height: 30),
+                    Text("DESCARGAS", style: GoogleFonts.orbitron(fontSize: 18, color: isDark ? AppColors.neonMagenta : Colors.pink)),
+                    const SizedBox(height: 10),
+                    
+                    if (rom.links.isEmpty)
+                      const Text("No hay enlaces disponibles.")
+                    else
+                      ...rom.links.map((link) => _buildDownloadItem(context, ref, link)),
+                      
+                    const SizedBox(height: 80), // Espacio para el FAB
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
-}
 
-class _InfoRow extends StatelessWidget {
-  final String label, value;
-  const _InfoRow({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildInfoRow(String label, String value) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text(value, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.outline)),
+          Flexible(child: Text(value, style: const TextStyle(color: Colors.grey))),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDownloadItem(BuildContext context, WidgetRef ref, DownloadLink link) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GlassCard(
+        opacity: isDark ? 0.1 : 0.8,
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: isDark ? Colors.white10 : Colors.black12,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.file_download_outlined),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(link.name.isNotEmpty ? link.name : "Archivo ROM", style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text("${link.format} • ${link.sizeStr} • ${link.host}", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: Icon(Icons.download_rounded, color: isDark ? AppColors.neonCyan : Colors.blue),
+              onPressed: () {
+                ref.read(downloadsProvider.notifier).startDownload(link);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text("Descarga iniciada"),
+                    backgroundColor: isDark ? AppColors.neonPurple : Colors.blue,
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-// ----------------------------------------------------------------------------
-// SHEET DE DESCARGAS (MODAL)
-// ----------------------------------------------------------------------------
-
+// BottomSheet de Descargas
 class DownloadsSheet extends ConsumerWidget {
   const DownloadsSheet({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final downloads = ref.watch(downloadsProvider);
-    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return DraggableScrollableSheet(
-      expand: false,
-      builder: (_, controller) {
-        return Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Text("Gestor de Descargas", style: theme.textTheme.titleLarge),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: downloads.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.download_done, size: 48, color: theme.colorScheme.outline),
-                          const SizedBox(height: 16),
-                          const Text("Lista vacía"),
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: controller,
-                      itemCount: downloads.length,
-                      itemBuilder: (context, index) {
-                        final task = downloads[index];
-                        return ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: task.isError 
-                                ? theme.colorScheme.errorContainer 
-                                : theme.colorScheme.primaryContainer,
-                            child: Icon(
-                              task.isCompleted ? Icons.check : (task.isError ? Icons.error : Icons.downloading),
-                              color: task.isError ? theme.colorScheme.error : theme.colorScheme.primary,
-                            ),
+    return Container(
+      decoration: BoxDecoration(
+        color: isDark ? AppColors.darkSurface : Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      padding: const EdgeInsets.all(20),
+      height: MediaQuery.of(context).size.height * 0.6, // Altura fija
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "GESTOR DE DESCARGAS",
+                style: GoogleFonts.orbitron(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              )
+            ],
+          ),
+          const Divider(),
+          Expanded(
+            child: downloads.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(FontAwesomeIcons.boxOpen, size: 50, color: Colors.grey),
+                        const SizedBox(height: 10),
+                        const Text("No hay descargas activas"),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: downloads.length,
+                    itemBuilder: (context, index) {
+                      final task = downloads[index];
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isDark ? Colors.black26 : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.grey.withOpacity(0.2)),
                           ),
-                          title: Text(task.fileName, maxLines: 1, overflow: TextOverflow.ellipsis),
-                          subtitle: Column(
+                          child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Expanded(child: Text(task.fileName, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                                  if (task.isCompleted)
+                                    const Icon(Icons.check_circle, color: Colors.green, size: 20)
+                                  else if (task.isError)
+                                    const Icon(Icons.error, color: Colors.red, size: 20),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              LinearProgressIndicator(
+                                value: task.progress,
+                                backgroundColor: Colors.grey.withOpacity(0.2),
+                                color: task.isError ? Colors.red : (task.isCompleted ? Colors.green : AppColors.neonCyan),
+                              ),
                               const SizedBox(height: 4),
-                              if (task.isDownloading)
-                                LinearProgressIndicator(value: task.progress, borderRadius: BorderRadius.circular(4)),
-                              Text(task.statusMessage, style: theme.textTheme.bodySmall),
+                              Text(
+                                task.statusMessage,
+                                style: const TextStyle(fontSize: 10, color: Colors.grey),
+                              ),
                             ],
                           ),
-                          trailing: task.isCompleted
-                            ? Icon(Icons.check_circle, color: theme.colorScheme.primary)
-                            : null,
-                        );
-                      },
-                    ),
-            ),
-          ],
-        );
-      },
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
